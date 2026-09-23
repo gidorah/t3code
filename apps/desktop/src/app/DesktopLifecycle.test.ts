@@ -18,6 +18,8 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 function makeElectronAppLayer(
   appListeners: Map<string, (...args: readonly unknown[]) => void>,
   quit: Effect.Effect<void> = Effect.void,
+  relaunch: (options: Electron.RelaunchOptions) => Effect.Effect<void> = () => Effect.void,
+  exit: (code: number) => Effect.Effect<void> = () => Effect.void,
 ) {
   const registerListener = (eventName: string, listener: (...args: readonly unknown[]) => void) =>
     Effect.acquireRelease(
@@ -36,8 +38,8 @@ function makeElectronAppLayer(
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
     quit,
-    exit: () => Effect.void,
-    relaunch: () => Effect.void,
+    exit,
+    relaunch,
     setPath: () => Effect.void,
     setName: () => Effect.void,
     setAboutPanelOptions: () => Effect.void,
@@ -101,6 +103,56 @@ function makeDesktopWindowLayer(
 }
 
 describe("DesktopLifecycle", () => {
+  it.effect("shuts down before relaunching through the supplied executable", () =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      const exited = yield* Deferred.make<void>();
+      const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+        platform: "linux",
+        isDevelopment: false,
+      } as DesktopEnvironment.DesktopEnvironment["Service"]);
+      const shutdownLayer = Layer.succeed(DesktopShutdown.DesktopShutdown, {
+        request: Effect.sync(() => {
+          events.push("shutdown");
+        }),
+        awaitRequest: Effect.void,
+        markComplete: Effect.void,
+        awaitComplete: Effect.void,
+        isComplete: Effect.succeed(true),
+      });
+      const layer = Layer.mergeAll(
+        makeElectronAppLayer(
+          new Map(),
+          Effect.void,
+          ({ execPath }) =>
+            Effect.sync(() => events.push(`relaunch:${execPath}`)).pipe(Effect.asVoid),
+          () =>
+            Effect.sync(() => events.push("exit")).pipe(
+              Effect.andThen(Deferred.succeed(exited, undefined)),
+              Effect.asVoid,
+            ),
+        ),
+        environmentLayer,
+        electronThemeLayer,
+        shutdownLayer,
+        DesktopState.layer,
+        makeDesktopWindowLayer({
+          flushMainWindowBounds: Effect.sync(() => events.push("flush")),
+        }),
+      );
+      yield* DesktopLifecycle.make
+        .relaunchWithExecutable("local AppImage replacement", "/home/test/.local/bin/t3code")
+        .pipe(Effect.provide(layer));
+      yield* Deferred.await(exited);
+      assert.deepEqual(events, [
+        "flush",
+        "shutdown",
+        "relaunch:/home/test/.local/bin/t3code",
+        "exit",
+      ]);
+    }),
+  );
+
   for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
     it.effect(`lets the updater's quit event proceed on ${platform}`, () => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();

@@ -1121,6 +1121,10 @@ export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** Commit embedded in the installed desktop app; absent in unpackaged runs. */
   getBuildCommitHash?: () => Promise<string | null>;
+  /** Whether this installed Linux AppImage has a newer local launcher target. */
+  getLocalAppImageReplacement?: () => Promise<boolean>;
+  /** Gracefully restart through the stable local launcher when its target changed. */
+  restartWithLocalAppImage?: () => Promise<boolean>;
   /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
   getPathForFile?: (file: File) => string;
   /** The desktop client's OS platform, read from Electron's preload process. */

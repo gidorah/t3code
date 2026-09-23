@@ -71,6 +71,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     return result as ReturnType<DesktopBridge["getAppBranding"]>;
   },
   getBuildCommitHash: () => ipcRenderer.invoke(IpcChannels.GET_BUILD_COMMIT_HASH_CHANNEL),
+  getLocalAppImageReplacement: () =>
+    ipcRenderer.invoke(IpcChannels.LOCAL_APP_IMAGE_REPLACEMENT_CHANNEL),
+  restartWithLocalAppImage: () => ipcRenderer.invoke(IpcChannels.LOCAL_APP_IMAGE_RESTART_CHANNEL),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getClientPlatform: () => clientPlatform,
   setNotificationBadge: (badge) =>

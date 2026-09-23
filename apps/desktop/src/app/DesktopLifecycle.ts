@@ -49,6 +49,10 @@ export class DesktopLifecycle extends Context.Service<
     readonly relaunch: (
       reason: string,
     ) => Effect.Effect<void, never, DesktopLifecycleRuntimeServices>;
+    readonly relaunchWithExecutable: (
+      reason: string,
+      executable: string,
+    ) => Effect.Effect<void, never, DesktopLifecycleRuntimeServices>;
     readonly register: Effect.Effect<
       void,
       never,
@@ -159,35 +163,41 @@ function quitFromSignal(
   );
 }
 
+const relaunchWithExecutable = Effect.fn("desktop.lifecycle.relaunch")(function* (
+  reason: string,
+  executable: string,
+) {
+  const electronApp = yield* ElectronApp.ElectronApp;
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  const state = yield* DesktopState.DesktopState;
+  yield* logLifecycleInfo("desktop relaunch requested", { reason });
+  yield* Effect.gen(function* () {
+    yield* Effect.yieldNow;
+    yield* Ref.set(state.quitting, true);
+    yield* requestDesktopShutdownAndWait();
+    if (environment.isDevelopment) {
+      yield* electronApp.exit(75);
+      return;
+    }
+    yield* electronApp.relaunch({
+      execPath: executable,
+      args: process.argv.slice(1),
+    });
+    yield* electronApp.exit(0);
+  }).pipe(
+    Effect.catchCause((cause) => {
+      const error = new DesktopLifecycleRelaunchError({ reason, cause });
+      return logLifecycleError(error.message, { error });
+    }),
+    Effect.forkDetach,
+    Effect.asVoid,
+  );
+});
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = DesktopLifecycle.of({
-  relaunch: Effect.fn("desktop.lifecycle.relaunch")(function* (reason) {
-    const electronApp = yield* ElectronApp.ElectronApp;
-    const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const state = yield* DesktopState.DesktopState;
-    yield* logLifecycleInfo("desktop relaunch requested", { reason });
-    yield* Effect.gen(function* () {
-      yield* Effect.yieldNow;
-      yield* Ref.set(state.quitting, true);
-      yield* requestDesktopShutdownAndWait();
-      if (environment.isDevelopment) {
-        yield* electronApp.exit(75);
-        return;
-      }
-      yield* electronApp.relaunch({
-        execPath: process.execPath,
-        args: process.argv.slice(1),
-      });
-      yield* electronApp.exit(0);
-    }).pipe(
-      Effect.catchCause((cause) => {
-        const error = new DesktopLifecycleRelaunchError({ reason, cause });
-        return logLifecycleError(error.message, { error });
-      }),
-      Effect.forkDetach,
-      Effect.asVoid,
-    );
-  }),
+  relaunch: (reason) => relaunchWithExecutable(reason, process.execPath),
+  relaunchWithExecutable: (reason, executable) => relaunchWithExecutable(reason, executable),
   register: Effect.gen(function* () {
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronWindow = yield* ElectronWindow.ElectronWindow;

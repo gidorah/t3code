@@ -93,8 +93,10 @@ sed -i "s/^Name=.*/Name=T3 Code (Alpha)/; s/^X-AppImage-Version=.*/X-AppImage-Ve
 The visible desktop entry at `~/.local/share/applications/t3code.desktop` must
 execute `~/.local/bin/t3code` using its absolute path. When the new app starts,
 it refreshes its hidden Linux URL-handler entry to the running AppImage path.
-Close and reopen the app at a convenient time. Verify the About commit, existing
-threads, and a provider session before removing the previous AppImage.
+If the running app supports local build replacement, its update control offers
+**Restart to use new build** after the launcher switches. Otherwise, close and
+reopen the app at a convenient time. Verify the About commit, existing threads,
+and a provider session before removing the previous AppImage.
 
 The production app continues using `~/.t3/userdata`. Before deploying a change
 with database migrations, take a consistent `VACUUM INTO` snapshot of its live

@@ -7,6 +7,10 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { cn } from "../../lib/utils";
 import { ensureLocalApi } from "../../localApi";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
+import {
+  restartWithLocalAppImage,
+  useLocalAppImageReplacement,
+} from "../../state/localAppImageReplacement";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
   canCheckForUpdate,
@@ -114,6 +118,7 @@ export function SidebarUpdatePill() {
 
 function SidebarUpdateControl() {
   const state = useDesktopUpdateState();
+  const localReplacement = useLocalAppImageReplacement();
   const [isActionPending, setIsActionPending] = useState(false);
   const [checkAnimationKey, setCheckAnimationKey] = useState(0);
   const [isCheckAnimationLatched, setIsCheckAnimationLatched] = useState(false);
@@ -143,21 +148,25 @@ function SidebarUpdateControl() {
     isDownloading,
     showCheckIcon,
   });
-  const tooltip = showUpdateDetails
-    ? state
-      ? getDesktopUpdateButtonTooltip(state)
-      : "Update available"
-    : showCheckIcon
-      ? "Checking for updates…"
-      : "Check for updates";
-  const disabled = showCheckIcon
-    ? true
+  const tooltip = localReplacement.available
+    ? "Restart to use new build"
     : showUpdateDetails
-      ? isDesktopUpdateButtonDisabled(state)
-      : !canCheckForUpdate(state);
+      ? state
+        ? getDesktopUpdateButtonTooltip(state)
+        : "Update available"
+      : showCheckIcon
+        ? "Checking for updates…"
+        : "Check for updates";
+  const disabled = localReplacement.available
+    ? false
+    : showCheckIcon
+      ? true
+      : showUpdateDetails
+        ? isDesktopUpdateButtonDisabled(state)
+        : !canCheckForUpdate(state);
   const isInteractionDisabled = disabled || isActionPending;
   const showReleaseNotesPopover = shouldUseSidebarUpdateReleaseNotesPopover(
-    showUpdateDetails,
+    showUpdateDetails && !localReplacement.available,
     state,
   );
 
@@ -175,10 +184,48 @@ function SidebarUpdateControl() {
 
   const handleAction = useCallback(async () => {
     const bridge = window.desktopBridge;
-    if (!bridge || !state) return;
+    if (!bridge) return;
     if (isInteractionDisabled) return;
 
     setIsActionPending(true);
+
+    if (localReplacement.available) {
+      try {
+        const restart = bridge.restartWithLocalAppImage;
+        const result = restart
+          ? await restartWithLocalAppImage({
+              confirm: (message) => ensureLocalApi().dialogs.confirm(message),
+              restart,
+            })
+          : "unavailable";
+        if (result === "unavailable") {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not restart with new build",
+              description: "The installed replacement is no longer available.",
+            }),
+          );
+        }
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not restart with new build",
+            description: error instanceof Error ? error.message : "Restart failed.",
+          }),
+        );
+      } finally {
+        await localReplacement.refresh();
+        setIsActionPending(false);
+      }
+      return;
+    }
+
+    if (!state) {
+      setIsActionPending(false);
+      return;
+    }
 
     if (action === "download") {
       void bridge
@@ -286,7 +333,7 @@ function SidebarUpdateControl() {
         );
       })
       .finally(() => setIsActionPending(false));
-  }, [action, isInteractionDisabled, prefersReducedMotion, state]);
+  }, [action, isInteractionDisabled, localReplacement, prefersReducedMotion, state]);
 
   const handleCheckAnimationIteration = useCallback(() => {
     setIsCheckAnimationLatched(
@@ -305,7 +352,7 @@ function SidebarUpdateControl() {
       className={cn(
         "inline-flex size-8 items-center justify-center rounded-full outline-hidden ring-ring transition-colors focus-visible:ring-2",
         isInteractionDisabled ? "cursor-not-allowed" : "cursor-pointer",
-        showUpdateIconState
+        showUpdateIconState || localReplacement.available
           ? cn(
               "bg-sidebar-control-surface text-sidebar-foreground",
               !isInteractionDisabled && "hover:bg-sidebar-row-hover",
@@ -314,7 +361,7 @@ function SidebarUpdateControl() {
               "text-[var(--sidebar-icon-color)]",
               !isInteractionDisabled && "hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
             ),
-        disabled && !showUpdateIconState && "opacity-60",
+        disabled && !showUpdateIconState && !localReplacement.available && "opacity-60",
       )}
       onClick={handleAction}
       onBlur={() => {
@@ -340,9 +387,9 @@ function SidebarUpdateControl() {
       <DesktopUpdateStatusIcon
         key={showCheckIcon ? checkAnimationKey : iconStatus}
         downloadPercent={state?.downloadPercent ?? null}
-        isCheckAnimating={showCheckIcon && !prefersReducedMotion}
+        isCheckAnimating={showCheckIcon && !prefersReducedMotion && !localReplacement.available}
         onCheckAnimationIteration={handleCheckAnimationIteration}
-        status={iconStatus}
+        status={localReplacement.available ? "downloaded" : iconStatus}
       />
     </button>
   );
@@ -383,7 +430,7 @@ function SidebarUpdateControl() {
             <TooltipPopup
               align="center"
               side="top"
-              variant={showUpdateDetails ? "glass" : "default"}
+              variant={showUpdateDetails || localReplacement.available ? "glass" : "default"}
             >
               {tooltip}
             </TooltipPopup>
