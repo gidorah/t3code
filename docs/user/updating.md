@@ -47,6 +47,10 @@ If you run the server with `npx` rather than an installed `t3`, there is
 nothing to update on the host: stop the server and relaunch it as
 `npx t3@<client-version>` with the same subcommand and options.
 
+A locally built desktop AppImage without an update feed cannot update through
+the app. Replace the AppImage with a new build and reopen it. Using the same T3
+home preserves its threads and settings.
+
 ## If an update fails
 
 Keep the client open until it reconnects or reports a failure. A failed service
