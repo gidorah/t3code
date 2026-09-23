@@ -58,6 +58,11 @@ vi.mock("~/lib/openPullRequestLink", () => ({
   resolvePullRequestPreviewTarget: () => null,
   useOpenChangeRequestLink: () => vi.fn(),
 }));
+vi.mock("./MermaidDiagram", () => ({
+  MermaidDiagram: ({ code }: { code: string }) => (
+    <output data-code={code}>Rendered: {code}</output>
+  ),
+}));
 
 import ChatMarkdown, {
   canUseMarkdownFileShellActions,
@@ -859,5 +864,60 @@ describe("ChatMarkdown Windows file links", () => {
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("d:alert");
     expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+describe("ChatMarkdown Mermaid fences", () => {
+  it.each([
+    ["shorter closing line", "````mermaid\nflowchart TD\n```\nA --> B", false],
+    ["mixed delimiter", "```mermaid\nflowchart TD\n~~~\nA --> B", false],
+    [
+      "complete fence before more text",
+      "````mermaid\nflowchart TD\nA --> B\n````\nmore text",
+      true,
+    ],
+  ])("handles %s while streaming", async (_name, text, shouldRender) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => {
+        renderer = create(<ChatMarkdown cwd="/tmp/project" text={text} isStreaming />);
+      });
+      expect(renderer!.root.findAllByType("output").length).toBe(shouldRender ? 1 : 0);
+      expect(
+        renderer!.root
+          .findAllByType(Button)
+          .some((button) => button.props["aria-label"] === "Show source"),
+      ).toBe(shouldRender);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("toggles diagram and source and keeps copy aimed at the code", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    let renderer: ReactTestRenderer | undefined;
+    const code = "flowchart TD\nA to B";
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown cwd="/tmp/project" text={`\`\`\`mermaid\n${code}\n\`\`\``} />,
+        );
+      });
+      const renderedCode = renderer!.root.findByType("output").props["data-code"] as string;
+      expect(renderedCode).toContain(code);
+      await act(async () => codeButton(renderer!, "Show source").onClick?.({} as never));
+      expect(renderer!.root.findAllByType("output")).toHaveLength(0);
+      await act(async () => codeButton(renderer!, "Copy code").onClick?.({} as never));
+      expect(writeText).toHaveBeenCalledWith(renderedCode);
+      await act(async () => codeButton(renderer!, "Show diagram").onClick?.({} as never));
+      expect(renderer!.root.findAllByType("output")).toHaveLength(1);
+    } finally {
+      await act(async () => renderer?.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 });
