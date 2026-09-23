@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     }
     return result as ReturnType<DesktopBridge["getAppBranding"]>;
   },
+  getBuildCommitHash: () => ipcRenderer.invoke(IpcChannels.GET_BUILD_COMMIT_HASH_CHANNEL),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getClientPlatform: () => clientPlatform,
   setNotificationBadge: (badge) =>

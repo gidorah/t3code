@@ -145,6 +145,26 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
+  it.effect("exposes the packaged commit from embedded metadata", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        const commit = yield* identity.buildCommitHash;
+        assert.deepEqual(commit, Option.some("abcdef123456"));
+      }),
+    ),
+  );
+
+  it.effect("does not report embedded metadata for an unpackaged app", () =>
+    withIdentity(
+      Effect.gen(function* () {
+        const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+        assert.deepEqual(yield* identity.buildCommitHash, Option.none());
+      }),
+      { environment: { isPackaged: false } },
+    ),
+  );
+
   it.effect("keeps using the legacy userData path when it already exists", () =>
     withIdentity(
       Effect.gen(function* () {

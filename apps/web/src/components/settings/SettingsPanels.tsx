@@ -269,6 +269,33 @@ function AboutVersionTitle() {
   );
 }
 
+function PersonalForkCommitRow() {
+  const [commitHash, setCommitHash] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void window.desktopBridge
+      ?.getBuildCommitHash?.()
+      .then((hash) => {
+        if (active) setCommitHash(hash);
+      })
+      .catch(() => {
+        if (active) setCommitHash(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <SettingsRow
+      title="Personal fork commit"
+      description="Commit used to build this desktop app."
+      control={<code className="text-xs text-muted-foreground">{commitHash ?? "Unavailable"}</code>}
+    />
+  );
+}
+
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
@@ -436,6 +463,7 @@ function AboutVersionSection() {
           </Tooltip>
         }
       />
+      {hasDesktopBridge ? <PersonalForkCommitRow /> : null}
       {hasDesktopBridge ? (
         <SettingsRow
           title="Update track"
