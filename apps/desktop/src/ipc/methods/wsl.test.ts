@@ -47,6 +47,7 @@ function makeLifecycleLayer(relaunchReasons: Array<string>) {
         Effect.sync(() => {
           relaunchReasons.push(reason);
         }),
+      relaunchWithExecutable: () => Effect.void,
       register: Effect.void,
     }),
   );

@@ -83,6 +83,10 @@ import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
+  restartWithLocalAppImage,
+  useLocalAppImageReplacement,
+} from "../../state/localAppImageReplacement";
+import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
 } from "../../modelSelection";
@@ -298,6 +302,7 @@ function PersonalForkCommitRow() {
 
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
+  const localReplacement = useLocalAppImageReplacement();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
   const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
 
@@ -338,6 +343,41 @@ function AboutVersionSection() {
   const handleButtonClick = useCallback(async () => {
     const bridge = window.desktopBridge;
     if (!bridge) return;
+
+    if (localReplacement.available) {
+      if (isUpdateActionPending) return;
+      setIsUpdateActionPending(true);
+      try {
+        const restart = bridge.restartWithLocalAppImage;
+        const result = restart
+          ? await restartWithLocalAppImage({
+              confirm: (message) => ensureLocalApi().dialogs.confirm(message),
+              restart,
+            })
+          : "unavailable";
+        if (result === "unavailable") {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not restart with new build",
+              description: "The installed replacement is no longer available.",
+            }),
+          );
+        }
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not restart with new build",
+            description: error instanceof Error ? error.message : "Restart failed.",
+          }),
+        );
+      } finally {
+        await localReplacement.refresh();
+        setIsUpdateActionPending(false);
+      }
+      return;
+    }
 
     const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
@@ -418,12 +458,17 @@ function AboutVersionSection() {
           }),
         );
       });
-  }, [isUpdateActionPending, updateState]);
+  }, [isUpdateActionPending, localReplacement, updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
-  const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
-  const buttonDisabled =
-    action === "none"
+  const buttonTooltip = localReplacement.available
+    ? "Restart to use new build"
+    : updateState
+      ? getDesktopUpdateButtonTooltip(updateState)
+      : null;
+  const buttonDisabled = localReplacement.available
+    ? false
+    : action === "none"
       ? !canCheckForUpdate(updateState)
       : isDesktopUpdateButtonDisabled(updateState);
 
@@ -433,10 +478,12 @@ function AboutVersionSection() {
     downloading: "Downloading…",
     "up-to-date": "Up to Date",
   };
-  const buttonLabel =
-    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
-  const description =
-    action === "download" || action === "install"
+  const buttonLabel = localReplacement.available
+    ? "Restart to Use New Build"
+    : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
+  const description = localReplacement.available
+    ? "A new local build is installed and ready to use."
+    : action === "download" || action === "install"
       ? "Update available."
       : "Current version of the application.";
 
