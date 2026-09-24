@@ -383,7 +383,9 @@ interface OpenCodeSessionContext {
   readonly pendingQuestions: Map<string, OpenCodeForm>;
   readonly toolNamesById: Map<string, string>;
   readonly toolInputsById: Map<string, Record<string, unknown>>;
-  readonly taskStartedToolCallIds: Set<string>;
+  readonly taskStartedIds: Set<string>;
+  readonly taskSettledIds: Set<string>;
+  readonly taskEarlyTerminalById: Map<string, { status: "completed" | "failed"; summary?: string }>;
   /** Highest durable event sequence observed for the parent session. */
   lastParentEventSequence: number;
   turnTokenUsage: OpenCodeTurnTokenUsageAccumulator | undefined;
@@ -2067,6 +2069,35 @@ export function makeOpenCodeAdapter(
       yield* run.pipe(Effect.forkIn(context.sessionScope));
     });
 
+    /** Emit the shared `task.started` payload for both task start sites. */
+    const emitTaskStarted = Effect.fn("emitTaskStarted")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+      toolCallId: string,
+      description: string,
+      role: string | undefined,
+      created: number,
+      raw: unknown,
+    ) {
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId,
+          createdAt: isoFromEpochMs(created),
+          raw,
+        })),
+        type: "task.started",
+        payload: {
+          taskId: RuntimeTaskId.make(toolCallId),
+          description,
+          title: description,
+          ...(role ? { role } : {}),
+          timelineBypass: true,
+          toolUseId: toolCallId,
+        },
+      });
+    });
+
     /** Consume OpenCode v2's durable event stream. */
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
@@ -2310,27 +2341,53 @@ export function makeOpenCodeAdapter(
                 title: event.data.name,
               },
             });
-            if (
-              isSubagentToolName(event.data.name) &&
-              !context.taskStartedToolCallIds.has(event.data.id)
-            ) {
-              context.taskStartedToolCallIds.add(event.data.id);
-              yield* emit({
-                ...(yield* buildEventBase({
-                  threadId: context.session.threadId,
+            if (isSubagentToolName(event.data.name)) {
+              if (context.taskSettledIds.has(event.data.id)) {
+                return;
+              }
+              const earlyTerminal = context.taskEarlyTerminalById.get(event.data.id);
+              if (earlyTerminal !== undefined) {
+                context.taskEarlyTerminalById.delete(event.data.id);
+                yield* emitTaskStarted(
+                  context,
                   turnId,
-                  createdAt: isoFromEpochMs(event.created),
-                  raw: event,
-                })),
-                type: "task.started",
-                payload: {
-                  taskId: RuntimeTaskId.make(event.data.id),
-                  description: event.data.name,
-                  title: event.data.name,
-                  timelineBypass: true,
-                  toolUseId: event.data.id,
-                },
-              });
+                  event.data.id,
+                  "task",
+                  undefined,
+                  event.created,
+                  event,
+                );
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId: context.session.threadId,
+                    turnId,
+                    createdAt: isoFromEpochMs(event.created),
+                    raw: event,
+                  })),
+                  type: "task.completed",
+                  payload: {
+                    taskId: RuntimeTaskId.make(event.data.id),
+                    status: earlyTerminal.status,
+                    ...(earlyTerminal.summary ? { summary: earlyTerminal.summary } : {}),
+                    timelineBypass: true,
+                  },
+                });
+                context.taskStartedIds.delete(event.data.id);
+                context.taskSettledIds.add(event.data.id);
+              } else if (context.taskStartedIds.has(event.data.id)) {
+                return;
+              } else {
+                yield* emitTaskStarted(
+                  context,
+                  turnId,
+                  event.data.id,
+                  event.data.name,
+                  undefined,
+                  event.created,
+                  event,
+                );
+                context.taskStartedIds.add(event.data.id);
+              }
             }
           }
           break;
@@ -2361,7 +2418,7 @@ export function makeOpenCodeAdapter(
                 },
               },
             });
-            if (isSubagentToolName(tool) && context.taskStartedToolCallIds.has(event.data.id)) {
+            if (isSubagentToolName(tool) && context.taskStartedIds.has(event.data.id)) {
               const description = toolInputString(input, "description") ?? tool;
               const role = toolInputString(
                 input,
@@ -2396,15 +2453,17 @@ export function makeOpenCodeAdapter(
           context.toolNamesById.delete(event.data.id);
           const input = context.toolInputsById.get(event.data.id);
           context.toolInputsById.delete(event.data.id);
+          const detail =
+            event.type === "session.tool.failed"
+              ? event.data.error.message
+              : event.data.content
+                  .filter((content) => content.type === "text")
+                  .map((content) => content.text)
+                  .join("\n");
+          const terminalStatus = event.type === "session.tool.failed" ? "failed" : "completed";
+          const terminalSummary = detail.trim() ? detail.trim().slice(0, 2000) : undefined;
           if (turnId) {
             const itemType = toToolLifecycleItemType(tool);
-            const detail =
-              event.type === "session.tool.failed"
-                ? event.data.error.message
-                : event.data.content
-                    .filter((content) => content.type === "text")
-                    .map((content) => content.text)
-                    .join("\n");
             yield* emit({
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
@@ -2430,7 +2489,14 @@ export function makeOpenCodeAdapter(
                 },
               },
             });
-            if (context.taskStartedToolCallIds.delete(event.data.id)) {
+          }
+          if (context.taskSettledIds.has(event.data.id)) {
+            break;
+          }
+          if (context.taskStartedIds.has(event.data.id)) {
+            context.taskStartedIds.delete(event.data.id);
+            context.taskSettledIds.add(event.data.id);
+            if (turnId) {
               yield* emit({
                 ...(yield* buildEventBase({
                   threadId: context.session.threadId,
@@ -2441,12 +2507,58 @@ export function makeOpenCodeAdapter(
                 type: "task.completed",
                 payload: {
                   taskId: RuntimeTaskId.make(event.data.id),
-                  status: event.type === "session.tool.failed" ? "failed" : "completed",
-                  ...(detail.trim() ? { summary: detail.trim().slice(0, 2000) } : {}),
+                  status: terminalStatus,
+                  ...(terminalSummary ? { summary: terminalSummary } : {}),
                   timelineBypass: true,
                 },
               });
             }
+          } else if (isSubagentToolName(tool)) {
+            context.taskSettledIds.add(event.data.id);
+            if (turnId) {
+              const description = toolInputString(input, "description") ?? tool;
+              const role = toolInputString(
+                input,
+                "subagent_type",
+                "subagentType",
+                "agent",
+                "taskType",
+              );
+              yield* emitTaskStarted(
+                context,
+                turnId,
+                event.data.id,
+                description,
+                role,
+                event.created,
+                event,
+              );
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: isoFromEpochMs(event.created),
+                  raw: event,
+                })),
+                type: "task.completed",
+                payload: {
+                  taskId: RuntimeTaskId.make(event.data.id),
+                  status: terminalStatus,
+                  ...(terminalSummary ? { summary: terminalSummary } : {}),
+                  timelineBypass: true,
+                },
+              });
+            }
+          } else if (tool === "tool") {
+            context.taskEarlyTerminalById.set(
+              event.data.id,
+              turnId
+                ? {
+                    status: terminalStatus,
+                    ...(terminalSummary ? { summary: terminalSummary } : {}),
+                  }
+                : { status: "completed" },
+            );
           }
           break;
         }
@@ -2800,7 +2912,9 @@ export function makeOpenCodeAdapter(
           defaultAgent: started.defaultAgent,
           openCodeSessionId: started.openCodeSession.id,
           relatedSessionIds: new Set([started.openCodeSession.id]),
-          taskStartedToolCallIds: new Set(),
+          taskStartedIds: new Set(),
+          taskSettledIds: new Set(),
+          taskEarlyTerminalById: new Map(),
           resolvedRequestIds: new Set(),
           autoRepliedRequestIds: new Set(),
           emittedTerminalRequestIds: new Set(),
@@ -3751,7 +3865,9 @@ export function makeOpenCodeAdapter(
           context.relatedSessionIds.add(forkedSessionId);
           context.toolNamesById.clear();
           context.toolInputsById.clear();
-          context.taskStartedToolCallIds.clear();
+          context.taskStartedIds.clear();
+          context.taskSettledIds.clear();
+          context.taskEarlyTerminalById.clear();
           context.lastParentEventSequence = 0;
           context.turnTokenUsage = undefined;
           context.activeTurnId = undefined;
