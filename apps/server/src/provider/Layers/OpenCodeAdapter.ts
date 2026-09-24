@@ -574,7 +574,11 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
 }
 
 function isSubagentToolName(name: string): boolean {
-  return name.trim().toLowerCase() === "task";
+  // OpenCode v1 spawns subagents through the `task` tool; v2 renamed it to
+  // `subagent` (proven by live `data.tool` values, never `task`). Match both
+  // exactly so near-misses like `task_status` stay plain tool rows.
+  const normalized = name.trim().toLowerCase();
+  return normalized === "task" || normalized === "subagent";
 }
 
 function toolInputString(
@@ -2424,6 +2428,7 @@ export function makeOpenCodeAdapter(
                 input,
                 "subagent_type",
                 "subagentType",
+                "subagent",
                 "agent",
                 "taskType",
               );
@@ -2521,6 +2526,7 @@ export function makeOpenCodeAdapter(
                 input,
                 "subagent_type",
                 "subagentType",
+                "subagent",
                 "agent",
                 "taskType",
               );
