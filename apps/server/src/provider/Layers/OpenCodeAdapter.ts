@@ -8,6 +8,7 @@ import {
   type ProviderSession,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   ThreadId,
   type ToolLifecycleItemType,
   type TurnTokenUsage,
@@ -382,6 +383,7 @@ interface OpenCodeSessionContext {
   readonly pendingQuestions: Map<string, OpenCodeForm>;
   readonly toolNamesById: Map<string, string>;
   readonly toolInputsById: Map<string, Record<string, unknown>>;
+  readonly taskStartedToolCallIds: Set<string>;
   /** Highest durable event sequence observed for the parent session. */
   lastParentEventSequence: number;
   turnTokenUsage: OpenCodeTurnTokenUsageAccumulator | undefined;
@@ -567,6 +569,21 @@ function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
     return "collab_agent_tool_call";
   }
   return "dynamic_tool_call";
+}
+
+function isSubagentToolName(name: string): boolean {
+  return name.trim().toLowerCase() === "task";
+}
+
+function toolInputString(
+  input: Record<string, unknown> | undefined,
+  ...keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const value = input?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 function mapPermissionToRequestType(
@@ -2293,6 +2310,28 @@ export function makeOpenCodeAdapter(
                 title: event.data.name,
               },
             });
+            if (
+              isSubagentToolName(event.data.name) &&
+              !context.taskStartedToolCallIds.has(event.data.id)
+            ) {
+              context.taskStartedToolCallIds.add(event.data.id);
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: isoFromEpochMs(event.created),
+                  raw: event,
+                })),
+                type: "task.started",
+                payload: {
+                  taskId: RuntimeTaskId.make(event.data.id),
+                  description: event.data.name,
+                  title: event.data.name,
+                  timelineBypass: true,
+                  toolUseId: event.data.id,
+                },
+              });
+            }
           }
           break;
         }
@@ -2322,6 +2361,32 @@ export function makeOpenCodeAdapter(
                 },
               },
             });
+            if (isSubagentToolName(tool) && context.taskStartedToolCallIds.has(event.data.id)) {
+              const description = toolInputString(input, "description") ?? tool;
+              const role = toolInputString(
+                input,
+                "subagent_type",
+                "subagentType",
+                "agent",
+                "taskType",
+              );
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: isoFromEpochMs(event.created),
+                  raw: event,
+                })),
+                type: "task.progress",
+                payload: {
+                  taskId: RuntimeTaskId.make(event.data.id),
+                  description,
+                  title: description,
+                  ...(role ? { role } : {}),
+                  timelineBypass: true,
+                },
+              });
+            }
           }
           break;
         }
@@ -2365,6 +2430,23 @@ export function makeOpenCodeAdapter(
                 },
               },
             });
+            if (context.taskStartedToolCallIds.delete(event.data.id)) {
+              yield* emit({
+                ...(yield* buildEventBase({
+                  threadId: context.session.threadId,
+                  turnId,
+                  createdAt: isoFromEpochMs(event.created),
+                  raw: event,
+                })),
+                type: "task.completed",
+                payload: {
+                  taskId: RuntimeTaskId.make(event.data.id),
+                  status: event.type === "session.tool.failed" ? "failed" : "completed",
+                  ...(detail.trim() ? { summary: detail.trim().slice(0, 2000) } : {}),
+                  timelineBypass: true,
+                },
+              });
+            }
           }
           break;
         }
@@ -2718,6 +2800,7 @@ export function makeOpenCodeAdapter(
           defaultAgent: started.defaultAgent,
           openCodeSessionId: started.openCodeSession.id,
           relatedSessionIds: new Set([started.openCodeSession.id]),
+          taskStartedToolCallIds: new Set(),
           resolvedRequestIds: new Set(),
           autoRepliedRequestIds: new Set(),
           emittedTerminalRequestIds: new Set(),
@@ -3668,6 +3751,7 @@ export function makeOpenCodeAdapter(
           context.relatedSessionIds.add(forkedSessionId);
           context.toolNamesById.clear();
           context.toolInputsById.clear();
+          context.taskStartedToolCallIds.clear();
           context.lastParentEventSequence = 0;
           context.turnTokenUsage = undefined;
           context.activeTurnId = undefined;

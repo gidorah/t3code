@@ -4941,7 +4941,8 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         Stream.filter(
           (event) =>
             event.threadId === threadId &&
-            (event.type === "item.started" ||
+            (event.type.startsWith("task.") ||
+              event.type === "item.started" ||
               event.type === "item.updated" ||
               event.type === "item.completed"),
         ),
@@ -4999,6 +5000,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       } satisfies OpenCodeEvent);
       const events = yield* Fiber.join(started);
       const [startedItem, calledItem, completedItem] = events;
+      NodeAssert.equal(events.filter((event) => event.type.startsWith("task.")).length, 0);
       NodeAssert.ok(startedItem?.type === "item.started");
       NodeAssert.ok(calledItem?.type === "item.updated");
       NodeAssert.ok(completedItem?.type === "item.completed");
@@ -5009,6 +5011,103 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         command: "pwd",
         result: "ok",
       });
+    }),
+  );
+  it.effect("emits task lifecycle for native task tools without changing tool items", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-native-task-tool");
+      const events = Array.from({ length: 4 }, () => promiseWithResolvers<unknown>());
+      runtimeMock.state.subscribedEvents = events.map((event) => event.promise);
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type.startsWith("task.") || event.type.startsWith("item.")),
+        ),
+        Stream.take(7),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Delegate",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      const sessionID = "http://127.0.0.1:9999/session";
+      const durable = (seq: number) => ({ aggregateID: sessionID, seq, version: 1 as const });
+      events[0]!.resolve({
+        id: "task-input",
+        created: 1,
+        type: "session.tool.input.started",
+        durable: durable(1),
+        data: { sessionID, assistantMessageID: "msg", id: "task-call", name: "task" },
+      } satisfies OpenCodeEvent);
+      events[1]!.resolve({
+        id: "task-input-repeat",
+        created: 2,
+        type: "session.tool.input.started",
+        durable: durable(2),
+        data: { sessionID, assistantMessageID: "msg", id: "task-call", name: "task" },
+      } satisfies OpenCodeEvent);
+      events[2]!.resolve({
+        id: "task-called",
+        created: 3,
+        type: "session.tool.called",
+        durable: durable(3),
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          id: "task-call",
+          input: { description: "Inspect tests", subagent_type: "explore" },
+          executed: true,
+        },
+      } satisfies OpenCodeEvent);
+      events[3]!.resolve({
+        id: "task-success",
+        created: 4,
+        type: "session.tool.success",
+        durable: { aggregateID: sessionID, seq: 4, version: 2 },
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          id: "task-call",
+          executed: true,
+          content: [{ type: "text", text: "Tests inspected" }],
+        },
+      } satisfies OpenCodeEvent);
+      const received = yield* Fiber.join(collected);
+      const tasks = received.filter((event) => event.type.startsWith("task."));
+      NodeAssert.deepEqual(
+        tasks.map((event) => event.type),
+        ["task.started", "task.progress", "task.completed"],
+      );
+      NodeAssert.equal(received.filter((event) => event.type === "item.started").length, 2);
+      NodeAssert.equal(received.filter((event) => event.type === "item.updated").length, 1);
+      NodeAssert.equal(received.filter((event) => event.type === "item.completed").length, 1);
+      NodeAssert.ok(tasks[0]?.type === "task.started");
+      NodeAssert.deepEqual(tasks[0].payload, {
+        taskId: "task-call",
+        description: "task",
+        title: "task",
+        timelineBypass: true,
+        toolUseId: "task-call",
+      });
+      NodeAssert.ok(tasks[1]?.type === "task.progress");
+      NodeAssert.equal(tasks[1].payload.description, "Inspect tests");
+      NodeAssert.equal(tasks[1].payload.title, "Inspect tests");
+      NodeAssert.equal(tasks[1].payload.role, "explore");
+      NodeAssert.ok(tasks[2]?.type === "task.completed");
+      NodeAssert.equal(tasks[2].payload.status, "completed");
+      NodeAssert.equal(tasks[2].payload.summary, "Tests inspected");
+      NodeAssert.equal(tasks[0].payload.timelineBypass, true);
+      NodeAssert.equal(tasks[1].payload.timelineBypass, true);
+      NodeAssert.equal(tasks[2].payload.timelineBypass, true);
     }),
   );
   it.effect("totals only parent native step usage when a child session runs", () =>
