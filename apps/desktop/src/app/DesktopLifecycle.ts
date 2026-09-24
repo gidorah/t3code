@@ -8,6 +8,7 @@ import * as Scope from "effect/Scope";
 import type * as Electron from "electron";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { spawnAppImageAfterExit } from "./AppImageRestart.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -179,22 +180,16 @@ const relaunchWithExecutable = Effect.fn("desktop.lifecycle.relaunch")(function*
       yield* electronApp.exit(75);
       return;
     }
-    if (
-      environment.platform === "linux" &&
-      executable !== process.execPath &&
-      process.env.APPIMAGE
-    ) {
-      // Electron relaunch inherits this process's environment after its AppImage
-      // mount is gone. Let the replacement establish its own mount and libraries.
-      delete process.env.APPIMAGE;
-      delete process.env.APPDIR;
-      delete process.env.ARGV0;
-      delete process.env.LD_LIBRARY_PATH;
+    if (environment.platform === "linux" && executable !== process.execPath) {
+      // Electron's relaunch child has NoNewPrivs=1, which prevents the setuid
+      // fusermount helper from mounting an AppImage. Spawn before Electron exits.
+      yield* Effect.promise(() => spawnAppImageAfterExit(executable, process.argv.slice(1)));
+    } else {
+      yield* electronApp.relaunch({
+        execPath: executable,
+        args: process.argv.slice(1),
+      });
     }
-    yield* electronApp.relaunch({
-      execPath: executable,
-      args: process.argv.slice(1),
-    });
     yield* electronApp.exit(0);
   }).pipe(
     Effect.catchCause((cause) => {
