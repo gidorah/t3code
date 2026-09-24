@@ -7,7 +7,9 @@ import {
 import {
   CheckIcon,
   ChevronRightIcon,
+  Code2Icon,
   CopyIcon,
+  EyeIcon,
   FileSpreadsheetIcon,
   FileTextIcon,
   GlobeIcon,
@@ -195,6 +197,7 @@ import {
   BrowserSettingsReadError,
 } from "../browser/openFileInPreview";
 import { resolveLinkTarget } from "../browser/browserLinkTarget";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
 
 interface ChatMarkdownProps {
@@ -552,6 +555,10 @@ function extractFenceLanguage(className: string | undefined): string {
   const raw = match?.[1] ?? "text";
   // Shiki doesn't bundle a gitignore grammar; ini is a close match (#685)
   return raw === "gitignore" ? "ini" : raw;
+}
+
+function isMermaidFenceLanguage(language: string): boolean {
+  return /^(mermaid|mmd)$/i.test(language.trim());
 }
 
 const FENCE_TITLE_ATTR_REGEX = /(?:^|\s)(?:title|file(?:name)?)=(?:"([^"]+)"|'([^']+)'|(\S+))/i;
@@ -919,16 +926,31 @@ function MarkdownCodeBlock({
   language,
   fenceTitle,
   theme,
+  renderDiagram = false,
   children,
 }: {
   code: string;
   language: string;
   fenceTitle: string | null;
   theme: "light" | "dark";
+  renderDiagram?: boolean;
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
   const [wrapped, setWrapped] = useState(readInitialWordWrapSetting);
+  const [showSource, setShowSource] = useState(false);
+  const [diagramFailed, setDiagramFailed] = useState(false);
+  const [lastCode, setLastCode] = useState(code);
+  if (renderDiagram && lastCode !== code) {
+    setLastCode(code);
+    setShowSource(false);
+    setDiagramFailed(false);
+  }
+  const showDiagram = renderDiagram && !showSource && !diagramFailed;
+  const handleDiagramError = useCallback(() => {
+    setDiagramFailed(true);
+    setShowSource(true);
+  }, []);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
   const copyLabel = copied ? "Copied" : "Copy code";
@@ -975,6 +997,7 @@ function MarkdownCodeBlock({
     <div
       className="chat-markdown-codeblock my-[0.65rem] overflow-hidden rounded-[var(--radius)] border border-border/70 bg-secondary leading-snug dark:border-transparent dark:bg-input/32"
       data-language={language}
+      data-mermaid={renderDiagram ? (showDiagram ? "diagram" : "source") : undefined}
       data-wrap={wrapped ? "true" : "false"}
     >
       <div className="chat-markdown-codeblock-header flex items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3 select-none">
@@ -986,23 +1009,47 @@ function MarkdownCodeBlock({
           />
         </span>
         <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  variant={wrapped ? "secondary" : "ghost-muted"}
-                  size="icon-xs"
-                  aria-pressed={wrapped}
-                  onClick={() => setWrapped((value) => !value)}
-                  aria-label={wrapLabel}
-                />
-              }
-            >
-              <WrapTextIcon className="size-3" />
-            </TooltipTrigger>
-            <TooltipPopup side="top">{wrapLabel}</TooltipPopup>
-          </Tooltip>
+          {renderDiagram ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost-muted"
+                    size="icon-xs"
+                    aria-pressed={showSource}
+                    onClick={() => {
+                      setShowSource((value) => !value);
+                      setDiagramFailed(false);
+                    }}
+                    aria-label={showSource ? "Show diagram" : "Show source"}
+                  />
+                }
+              >
+                {showSource ? <EyeIcon className="size-3" /> : <Code2Icon className="size-3" />}
+              </TooltipTrigger>
+              <TooltipPopup side="top">{showSource ? "Show diagram" : "Show source"}</TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {!showDiagram ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant={wrapped ? "secondary" : "ghost-muted"}
+                    size="icon-xs"
+                    aria-pressed={wrapped}
+                    onClick={() => setWrapped((value) => !value)}
+                    aria-label={wrapLabel}
+                  />
+                }
+              >
+                <WrapTextIcon className="size-3" />
+              </TooltipTrigger>
+              <TooltipPopup side="top">{wrapLabel}</TooltipPopup>
+            </Tooltip>
+          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
@@ -1021,7 +1068,18 @@ function MarkdownCodeBlock({
           </Tooltip>
         </span>
       </div>
-      {children}
+      {showDiagram ? (
+        <MermaidDiagram
+          key={`${theme}:${code}`}
+          code={code}
+          language={language}
+          theme={theme}
+          fallback={children}
+          onError={handleDiagramError}
+        />
+      ) : (
+        children
+      )}
     </div>
   );
 }
@@ -3210,7 +3268,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     return <MarkdownDetails open={detailsOpen}>{children}</MarkdownDetails>;
   },
   pre: function MarkdownPre({ node, children, ...props }) {
-    const { resolvedTheme, diffThemeName, isStreaming } = use(ChatMarkdownRendererContext);
+    const { resolvedTheme, diffThemeName, isStreaming, text } = use(ChatMarkdownRendererContext);
     const codeBlock = extractCodeBlock(children);
     if (!codeBlock) {
       return <pre {...props}>{children}</pre>;
@@ -3218,12 +3276,21 @@ const CHAT_MARKDOWN_COMPONENTS = {
 
     const language = extractFenceLanguage(codeBlock.className);
     const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
+    const sourceEnd = node?.position?.end?.offset;
+    const source = text.slice(node?.position?.start?.offset ?? 0, sourceEnd);
+    const opening = /^ {0,3}(`{3,}|~{3,})[^\n]*\n/.exec(source)?.[1];
+    const lastLine = source.slice(source.lastIndexOf("\n") + 1);
+    const fenceComplete =
+      typeof sourceEnd === "number" &&
+      opening !== undefined &&
+      new RegExp(`^ {0,3}${opening[0]}{${opening.length},}[ \\t]*$`).test(lastLine);
     return (
       <MarkdownCodeBlock
         code={codeBlock.code}
         language={language}
         fenceTitle={fenceTitle}
         theme={resolvedTheme}
+        renderDiagram={isMermaidFenceLanguage(language) && (!isStreaming || fenceComplete)}
       >
         <RenderErrorBoundary
           resetKeys={[codeBlock.code, language, diffThemeName, isStreaming]}
