@@ -179,6 +179,18 @@ const relaunchWithExecutable = Effect.fn("desktop.lifecycle.relaunch")(function*
       yield* electronApp.exit(75);
       return;
     }
+    if (
+      environment.platform === "linux" &&
+      executable !== process.execPath &&
+      process.env.APPIMAGE
+    ) {
+      // Electron relaunch inherits this process's environment after its AppImage
+      // mount is gone. Let the replacement establish its own mount and libraries.
+      delete process.env.APPIMAGE;
+      delete process.env.APPDIR;
+      delete process.env.ARGV0;
+      delete process.env.LD_LIBRARY_PATH;
+    }
     yield* electronApp.relaunch({
       execPath: executable,
       args: process.argv.slice(1),
