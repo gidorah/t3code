@@ -5110,6 +5110,102 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(tasks[2].payload.timelineBypass, true);
     }),
   );
+  it.effect("emits task lifecycle for the v2 subagent tool but not for task_status", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-subagent-tool-name");
+      const events = Array.from({ length: 5 }, () => promiseWithResolvers<unknown>());
+      runtimeMock.state.subscribedEvents = events.map((event) => event.promise);
+      const collected = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.threadId === threadId &&
+            (event.type.startsWith("task.") || event.type.startsWith("item.")),
+        ),
+        Stream.take(8),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Delegate",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      const sessionID = "http://127.0.0.1:9999/session";
+      const durable = (seq: number) => ({ aggregateID: sessionID, seq, version: 1 as const });
+      events[0]!.resolve({
+        id: "subagent-input",
+        created: 1,
+        type: "session.tool.input.started",
+        durable: durable(1),
+        data: { sessionID, assistantMessageID: "msg", id: "subagent-call", name: "subagent" },
+      } satisfies OpenCodeEvent);
+      events[1]!.resolve({
+        id: "subagent-called",
+        created: 2,
+        type: "session.tool.called",
+        durable: durable(2),
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          id: "subagent-call",
+          input: { description: "Scout deps", subagent: "scout" },
+          executed: true,
+        },
+      } satisfies OpenCodeEvent);
+      events[2]!.resolve({
+        id: "subagent-success",
+        created: 3,
+        type: "session.tool.success",
+        durable: { aggregateID: sessionID, seq: 3, version: 2 },
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          id: "subagent-call",
+          executed: true,
+          content: [{ type: "text", text: "Deps scouted" }],
+        },
+      } satisfies OpenCodeEvent);
+      events[3]!.resolve({
+        id: "status-input",
+        created: 4,
+        type: "session.tool.input.started",
+        durable: durable(4),
+        data: { sessionID, assistantMessageID: "msg", id: "status-call", name: "task_status" },
+      } satisfies OpenCodeEvent);
+      events[4]!.resolve({
+        id: "status-success",
+        created: 5,
+        type: "session.tool.success",
+        durable: { aggregateID: sessionID, seq: 5, version: 2 },
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          id: "status-call",
+          executed: true,
+          content: [{ type: "text", text: "ok" }],
+        },
+      } satisfies OpenCodeEvent);
+      const received = yield* Fiber.join(collected);
+      const tasks = received.filter((event) => event.type.startsWith("task."));
+      NodeAssert.deepEqual(
+        tasks.map((event) => event.type),
+        ["task.started", "task.progress", "task.completed"],
+      );
+      NodeAssert.ok(tasks[0]?.type === "task.started");
+      NodeAssert.equal(tasks[0].payload.taskId, "subagent-call");
+      NodeAssert.ok(tasks[1]?.type === "task.progress");
+      NodeAssert.equal(tasks[1].payload.description, "Scout deps");
+      NodeAssert.equal(tasks[1].payload.role, "scout");
+      NodeAssert.ok(tasks[2]?.type === "task.completed");
+      NodeAssert.equal(tasks[2].payload.status, "completed");
+    }),
+  );
   it.effect("closes a task whose terminal arrives before its start", () =>
     Effect.gen(function* () {
       const adapter = yield* OpenCodeAdapter;
