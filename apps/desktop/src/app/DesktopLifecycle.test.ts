@@ -3,6 +3,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import { vi } from "vite-plus/test";
 
 import type * as Electron from "electron";
 
@@ -10,10 +11,13 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { spawnAppImageAfterExit } from "./AppImageRestart.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+
+vi.mock("./AppImageRestart.ts", () => ({ spawnAppImageAfterExit: vi.fn() }));
 
 function makeElectronAppLayer(
   appListeners: Map<string, (...args: readonly unknown[]) => void>,
@@ -103,21 +107,14 @@ function makeDesktopWindowLayer(
 }
 
 describe("DesktopLifecycle", () => {
-  it.effect("shuts down before relaunching through the supplied executable", () =>
+  it.effect("shuts down before spawning the replacement AppImage", () =>
     Effect.gen(function* () {
       const events: string[] = [];
-      let relaunchEnvironment: Record<string, string | undefined> = {};
       const exited = yield* Deferred.make<void>();
-      const appImageEnvironment = {
-        APPIMAGE: process.env.APPIMAGE,
-        APPDIR: process.env.APPDIR,
-        ARGV0: process.env.ARGV0,
-        LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
-      };
-      process.env.APPIMAGE = "/home/test/old.AppImage";
-      process.env.APPDIR = "/tmp/.mount_old";
-      process.env.ARGV0 = "/home/test/old.AppImage";
-      process.env.LD_LIBRARY_PATH = "/tmp/.mount_old/usr/lib";
+      vi.mocked(spawnAppImageAfterExit).mockImplementation(async (executable) => {
+        events.push(`spawn:${executable}`);
+        return {} as Awaited<ReturnType<typeof spawnAppImageAfterExit>>;
+      });
       const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
         platform: "linux",
         isDevelopment: false,
@@ -135,16 +132,7 @@ describe("DesktopLifecycle", () => {
         makeElectronAppLayer(
           new Map(),
           Effect.void,
-          ({ execPath }) =>
-            Effect.sync(() => {
-              events.push(`relaunch:${execPath}`);
-              relaunchEnvironment = {
-                APPIMAGE: process.env.APPIMAGE,
-                APPDIR: process.env.APPDIR,
-                ARGV0: process.env.ARGV0,
-                LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH,
-              };
-            }),
+          () => Effect.die("Electron relaunch must not handle AppImage replacement"),
           () =>
             Effect.sync(() => events.push("exit")).pipe(
               Effect.andThen(Deferred.succeed(exited, undefined)),
@@ -159,29 +147,11 @@ describe("DesktopLifecycle", () => {
           flushMainWindowBounds: Effect.sync(() => events.push("flush")),
         }),
       );
-      try {
-        yield* DesktopLifecycle.make
-          .relaunchWithExecutable("local AppImage replacement", "/home/test/.local/bin/t3code")
-          .pipe(Effect.provide(layer));
-        yield* Deferred.await(exited);
-        assert.deepEqual(events, [
-          "flush",
-          "shutdown",
-          "relaunch:/home/test/.local/bin/t3code",
-          "exit",
-        ]);
-        assert.deepEqual(relaunchEnvironment, {
-          APPIMAGE: undefined,
-          APPDIR: undefined,
-          ARGV0: undefined,
-          LD_LIBRARY_PATH: undefined,
-        });
-      } finally {
-        for (const [name, value] of Object.entries(appImageEnvironment)) {
-          if (value === undefined) delete process.env[name];
-          else process.env[name] = value;
-        }
-      }
+      yield* DesktopLifecycle.make
+        .relaunchWithExecutable("local AppImage replacement", "/home/test/.local/bin/t3code")
+        .pipe(Effect.provide(layer));
+      yield* Deferred.await(exited);
+      assert.deepEqual(events, ["flush", "shutdown", "spawn:/home/test/.local/bin/t3code", "exit"]);
     }),
   );
 
